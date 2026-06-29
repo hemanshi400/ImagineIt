@@ -1,6 +1,9 @@
 import { NextResponse } from "next/server";
 import { generateReactionPack } from "@/lib/generation-service";
 
+// Sora video generation polls for a few minutes; allow a long request window.
+export const maxDuration = 300;
+
 export async function POST(request: Request) {
   const body = (await request.json().catch(() => null)) as { phrase?: string } | null;
   const phrase = body?.phrase?.trim();

@@ -82,3 +82,44 @@ export async function uploadRemoteAssetToCloudinary(
 export function buildCloudinaryDeliveryUrl(publicId: string, format: "png" | "gif") {
   return `https://res.cloudinary.com/${cloudinaryCloudName}/image/upload/f_${format}/${publicId}.${format}`;
 }
+
+// Upload raw video bytes (e.g. a Sora MP4) to Cloudinary as a video asset.
+export async function uploadVideoBufferToCloudinary(
+  bytes: Buffer,
+  folder = "saysee"
+): Promise<{ url: string; publicId: string } | null> {
+  const timestamp = Math.floor(Date.now() / 1000).toString();
+  const signature = signCloudinaryParams({ folder, timestamp });
+
+  const formData = new FormData();
+  formData.append("file", new Blob([new Uint8Array(bytes)], { type: "video/mp4" }), "saysee.mp4");
+  formData.append("folder", folder);
+  formData.append("api_key", cloudinaryApiKey);
+  formData.append("timestamp", timestamp);
+  formData.append("signature", signature);
+
+  try {
+    const response = await fetch(`https://api.cloudinary.com/v1_1/${cloudinaryCloudName}/video/upload`, {
+      method: "POST",
+      body: formData
+    });
+
+    if (!response.ok) {
+      console.error("Cloudinary video upload failed:", await response.text());
+      return null;
+    }
+
+    const data = (await response.json()) as { secure_url: string; public_id: string };
+    return { url: data.secure_url, publicId: data.public_id };
+  } catch (error) {
+    console.error("Cloudinary video upload failed:", error);
+    return null;
+  }
+}
+
+// Deliver an uploaded video as an infinitely-looping, size-optimized animated GIF.
+// e_loop injects the NETSCAPE2.0 loop marker (Cloudinary's default GIF plays only
+// once); w_360/fps_12/q_auto keep it from ballooning to tens of MB.
+export function buildCloudinaryVideoGifUrl(publicId: string) {
+  return `https://res.cloudinary.com/${cloudinaryCloudName}/video/upload/e_loop,f_gif,w_360,fps_12,q_auto/${publicId}.gif`;
+}

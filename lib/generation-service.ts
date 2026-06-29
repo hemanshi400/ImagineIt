@@ -1,5 +1,18 @@
-import { uploadRemoteAssetToCloudinary, buildCloudinaryDeliveryUrl, hasCloudinaryConfig } from "@/lib/cloudinary-client";
-import { analyzeWithGPT, generateImageWithDALLE, hasOpenAIKey } from "@/lib/openai-client";
+import {
+  uploadRemoteAssetToCloudinary,
+  uploadVideoBufferToCloudinary,
+  buildCloudinaryDeliveryUrl,
+  buildCloudinaryVideoGifUrl,
+  hasCloudinaryConfig
+} from "@/lib/cloudinary-client";
+import {
+  analyzeWithGPT,
+  buildSoraPrompt,
+  generateAnimationSpec,
+  generateImageWithDALLE,
+  generateVideoWithSora,
+  hasOpenAIKey
+} from "@/lib/openai-client";
 import {
   type Analysis,
   type GenerationResult,
@@ -72,7 +85,7 @@ function buildVisualPrompt(phrase: string, analysis: Analysis, item: ReactionIte
   }
 
   return [
-    `Create a ${(item.kind as string).toLowerCase()} reaction visual for: "${phrase}"`,
+    `Create a ${String(item.kind).toLowerCase()} reaction visual for: "${phrase}"`,
     `Character: ${item.character}`,
     `Style: ${item.artStyle}`,
     `Emotion: ${analysis.emotion}`,
@@ -113,31 +126,75 @@ async function generateCloudinaryAsset(prompt: string, format: "png" | "gif") {
   };
 }
 
-async function attachMediaToOutput(phrase: string, analysis: Analysis, item: ReactionItem, fallbackImageUrl?: string) {
-  const prompt = buildVisualPrompt(phrase, analysis, item);
+// Full animated-GIF pipeline: phrase -> animation spec -> Sora video -> looping GIF.
+async function generateAnimatedGif(
+  phrase: string
+): Promise<{ mediaUrl: string; downloadUrl: string; mimeType: string; publicId?: string } | null> {
+  const spec = await generateAnimationSpec(phrase);
+  if (!spec) {
+    return null;
+  }
 
-  if (item.kind === "GIF" && fallbackImageUrl) {
-    if (!hasCloudinaryConfig()) {
-      return {
-        ...item,
-        mediaUrl: fallbackImageUrl,
-        downloadUrl: fallbackImageUrl,
-        mimeType: "image/gif",
-        isGenerated: true
-      };
-    }
+  const soraPrompt = buildSoraPrompt(spec, phrase);
+  const video = await generateVideoWithSora(soraPrompt);
+  if (!video) {
+    return null;
+  }
 
-    const uploaded = await uploadRemoteAssetToCloudinary(fallbackImageUrl, "saysee");
+  if (hasCloudinaryConfig()) {
+    const uploaded = await uploadVideoBufferToCloudinary(video.bytes, "saysee");
     if (uploaded) {
-      const deliveredUrl = buildCloudinaryDeliveryUrl(uploaded.publicId, "gif");
+      const deliveredUrl = buildCloudinaryVideoGifUrl(uploaded.publicId);
+      console.log(`✓ GIF ready (looping Cloudinary .gif): ${deliveredUrl}`);
       return {
-        ...item,
         mediaUrl: deliveredUrl,
         downloadUrl: deliveredUrl,
         mimeType: "image/gif",
-        publicId: uploaded.publicId,
-        isGenerated: true
+        publicId: uploaded.publicId
       };
+    }
+  }
+
+  // No Cloudinary (or upload failed): inline the MP4 so the <video> tag can loop it.
+  console.warn("⚠ GIF falling back to inline MP4 (Cloudinary unavailable) — looping via <video> tag");
+  const dataUrl = `data:${video.mimeType};base64,${video.bytes.toString("base64")}`;
+  return { mediaUrl: dataUrl, downloadUrl: dataUrl, mimeType: video.mimeType };
+}
+
+async function attachMediaToOutput(phrase: string, analysis: Analysis, item: ReactionItem, fallbackImageUrl?: string) {
+  const prompt = buildVisualPrompt(phrase, analysis, item);
+
+  if (item.kind === "GIF") {
+    // Try a real animated clip first.
+    const animated = await generateAnimatedGif(phrase);
+    if (animated) {
+      return { ...item, ...animated, isGenerated: true };
+    }
+
+    // Sora unavailable/failed: fall back to the still-image frame (served as a .gif).
+    if (fallbackImageUrl) {
+      if (!hasCloudinaryConfig()) {
+        return {
+          ...item,
+          mediaUrl: fallbackImageUrl,
+          downloadUrl: fallbackImageUrl,
+          mimeType: "image/gif",
+          isGenerated: true
+        };
+      }
+
+      const uploaded = await uploadRemoteAssetToCloudinary(fallbackImageUrl, "saysee");
+      if (uploaded) {
+        const deliveredUrl = buildCloudinaryDeliveryUrl(uploaded.publicId, "gif");
+        return {
+          ...item,
+          mediaUrl: deliveredUrl,
+          downloadUrl: deliveredUrl,
+          mimeType: "image/gif",
+          publicId: uploaded.publicId,
+          isGenerated: true
+        };
+      }
     }
   }
 

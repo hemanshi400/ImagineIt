@@ -17,7 +17,8 @@ async function downloadReaction(item: ReactionItem) {
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;
-  const extension = item.mimeType === "image/gif" ? "gif" : "png";
+  const extension =
+    item.mimeType === "video/mp4" ? "mp4" : item.mimeType === "image/gif" ? "gif" : "png";
   anchor.download = `saysee-${item.kind.toLowerCase()}.${extension}`;
   anchor.click();
   URL.revokeObjectURL(url);
@@ -51,13 +52,24 @@ export function ReactionCard({ item }: Props) {
 
       {item.mediaUrl ? (
         <div className="mb-4 overflow-hidden rounded-2xl border border-slate-200 bg-slate-50">
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src={item.mediaUrl}
-            alt={`${item.kind} preview for ${item.caption}`}
-            className="h-48 w-full object-cover"
-            loading="lazy"
-          />
+          {item.mimeType === "video/mp4" ? (
+            <video
+              src={item.mediaUrl}
+              className="h-48 w-full object-cover"
+              autoPlay
+              loop
+              muted
+              playsInline
+            />
+          ) : (
+            /* eslint-disable-next-line @next/next/no-img-element */
+            <img
+              src={item.mediaUrl}
+              alt={`${item.kind} preview for ${item.caption}`}
+              className="h-48 w-full object-cover"
+              loading="lazy"
+            />
+          )}
         </div>
       ) : (
         <div className={`mb-4 rounded-2xl bg-gradient-to-br ${item.gradient} p-5 text-white`}>

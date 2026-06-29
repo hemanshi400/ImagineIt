@@ -2,6 +2,9 @@ import { ReactionCard } from "@/components/reaction-card";
 import { generateReactionPack } from "@/lib/generation-service";
 import { cache } from "react";
 
+// Sora video generation polls for a few minutes; allow a long render window.
+export const maxDuration = 300;
+
 type PageProps = {
   searchParams: Promise<{ phrase?: string; types?: string }>;
 };
