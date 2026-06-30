@@ -184,14 +184,33 @@ export async function generateImageWithDALLE(prompt: string): Promise<string> {
   return "";
 }
 
+export type AnimationContext = {
+  language?: string;
+  meaning?: string;
+  emotion?: string;
+};
+
 // Convert a phrase into a structured cinematic animation spec via GPT.
-export async function generateAnimationSpec(phrase: string): Promise<AnimationSpec | null> {
+// The optional context carries the pre-analyzed language + English meaning so the
+// director animates the correct emotion while still preserving the exact phrase.
+export async function generateAnimationSpec(
+  phrase: string,
+  context?: AnimationContext
+): Promise<AnimationSpec | null> {
   try {
+    const userContent = context?.meaning
+      ? `Phrase (keep this exact text on screen): "${phrase}"\n` +
+        `Detected language: ${context.language ?? "unknown"}\n` +
+        `English meaning (animate THIS emotion/behaviour): ${context.meaning}\n` +
+        (context.emotion ? `Emotion: ${context.emotion}\n` : "") +
+        `Build the animation prompt now.`
+      : phrase;
+
     const response = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [
         { role: "system", content: GIF_PROMPT_SYSTEM },
-        { role: "user", content: phrase }
+        { role: "user", content: userContent }
       ],
       response_format: { type: "json_object" }
     });
@@ -209,9 +228,15 @@ export async function generateAnimationSpec(phrase: string): Promise<AnimationSp
 }
 
 // Flatten the structured spec into a single descriptive prompt for Sora.
-export function buildSoraPrompt(spec: AnimationSpec, phrase: string): string {
+export function buildSoraPrompt(spec: AnimationSpec, phrase: string, context?: AnimationContext): string {
+  // Be explicit about the script so Sora renders non-Latin text correctly.
+  const scriptHint = context?.language && context.language !== "English"
+    ? ` The text is in ${context.language} script; render every character exactly as written.`
+    : "";
+
   const parts = [
     spec.scene,
+    context?.meaning && `The scene must convey this meaning: ${context.meaning}.`,
     spec.character && `Character: ${spec.character}.`,
     spec.facial_expression && `Facial expression: ${spec.facial_expression}.`,
     spec.body_language && `Body language: ${spec.body_language}.`,
@@ -223,7 +248,7 @@ export function buildSoraPrompt(spec: AnimationSpec, phrase: string): string {
     spec.secondary_motion && `Secondary motion: ${spec.secondary_motion}.`,
     spec.color_palette && `Color palette: ${spec.color_palette}.`,
     spec.loop && `Loop: ${spec.loop}.`,
-    `Display the exact on-screen text, unchanged and correctly spelled: "${phrase}".`,
+    `Display this exact on-screen caption, unchanged and correctly spelled: "${phrase}".${scriptHint}`,
     spec.negative_prompt && `Avoid: ${spec.negative_prompt}.`
   ].filter(Boolean);
 
@@ -298,31 +323,69 @@ export async function generateVideoWithSora(
   }
 }
 
-export async function analyzeWithGPT(text: string): Promise<{
+export type PhraseAnalysis = {
+  // The primary language of the phrase.
+  language: "English" | "Hindi" | "Gujarati";
+  // Whether it was written in a non-native (romanized / Latin) script,
+  // e.g. Hinglish "Kya baat hai" or romanized Gujarati "Kem cho".
+  romanized: boolean;
+  // A faithful English translation of what the phrase means.
+  meaning: string;
   emotion: string;
   intent: string;
   character: string;
   style: string;
-}> {
+};
+
+const ANALYZER_SYSTEM = `You are a precise multilingual language analyst for an Indian social-media reaction app.
+
+Given a short phrase, identify its language and meaning. The phrase may be written in:
+- English
+- Hindi (Devanagari like "क्या बात है", or romanized Hinglish like "kya baat hai")
+- Gujarati (Gujarati script like "કેમ છો", or romanized like "kem cho")
+
+Detect the language by BOTH script and vocabulary, not just keywords:
+- Devanagari script => Hindi. Gujarati script => Gujarati.
+- For romanized text, decide by the actual words (e.g. "kem cho", "majama", "su che", "jalsa" => Gujarati; "kya", "yaar", "arre", "hat ja", "bhai" => Hindi). If it is plain English with no Hindi/Gujarati words, it is English.
+- If genuinely mixed, pick the language that carries the core meaning.
+
+Respond ONLY with JSON:
+{
+  "language": "English" | "Hindi" | "Gujarati",
+  "romanized": true | false,
+  "meaning": "<faithful English translation of the phrase's meaning>",
+  "emotion": "<one word, e.g. Happy, Sad, Funny, Angry, Excited, Greeting, Celebration, Confused, Sarcastic, Surprised>",
+  "intent": "<short label, e.g. Greeting, Celebration, Dismissal, Sympathy, Motivation, Sarcasm, Excitement, Humor, Attitude>",
+  "character": "<an expressive mascot that fits the emotion, e.g. Panda, Dog, Cat, Lion, Monkey>",
+  "style": "<a visual tone word, e.g. Playful, Warm, Bold, Cute>"
+}`;
+
+export async function analyzeWithGPT(text: string): Promise<PhraseAnalysis> {
+  const fallback: PhraseAnalysis = {
+    language: "English",
+    romanized: false,
+    meaning: text,
+    emotion: "Happy",
+    intent: "Greeting",
+    character: "Panda",
+    style: "Cute"
+  };
+
   try {
     const response = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [
-        {
-          role: "system",
-          content:
-            'You are a reaction emotion analyzer. Respond with JSON: { "emotion": "...", "intent": "...", "character": "...", "style": "..." }'
-        },
-        {
-          role: "user",
-          content: `Analyze this expression and suggest a reaction: "${text}"`
-        }
+        { role: "system", content: ANALYZER_SYSTEM },
+        { role: "user", content: `Analyze this phrase: "${text}"` }
       ],
       response_format: { type: "json_object" }
     });
 
     const content = response.choices[0].message.content || "{}";
-    return JSON.parse(content);
+    const parsed = JSON.parse(content) as Partial<PhraseAnalysis>;
+    const analysis = { ...fallback, ...parsed };
+    console.log(`🌐 Detected ${analysis.language}${analysis.romanized ? " (romanized)" : ""}: "${text}" => ${analysis.meaning}`);
+    return analysis;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     const lower = message.toLowerCase();
@@ -330,10 +393,10 @@ export async function analyzeWithGPT(text: string): Promise<{
     // 429 = quota exceeded, 401 = auth, log silently and use fallback
     if (lower.includes("429") || lower.includes("quota")) {
       console.log("ℹ GPT analysis skipped (quota reached), using fallback");
-      return { emotion: "Happy", intent: "Greeting", character: "Panda", style: "Cute" };
+      return fallback;
     }
 
     console.warn("⚠ GPT analysis failed:", message.substring(0, 80));
-    return { emotion: "Happy", intent: "Greeting", character: "Panda", style: "Cute" };
+    return fallback;
   }
 }

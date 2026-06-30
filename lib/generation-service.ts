@@ -6,6 +6,8 @@ import {
   hasCloudinaryConfig
 } from "@/lib/cloudinary-client";
 import {
+  type AnimationContext,
+  type PhraseAnalysis,
   analyzeWithGPT,
   buildSoraPrompt,
   generateAnimationSpec,
@@ -20,9 +22,10 @@ import {
   generateReactions
 } from "@/lib/reaction-engine";
 
-function normalizeAnalysis(base: Analysis, ai: { emotion: string; intent: string; character: string; style: string }) {
+function normalizeAnalysis(base: Analysis, ai: PhraseAnalysis): Analysis {
   return {
     ...base,
+    language: ai.language,
     emotion: ai.emotion as Analysis["emotion"],
     intent: ai.intent as Analysis["intent"],
     tone: ai.style
@@ -128,14 +131,15 @@ async function generateCloudinaryAsset(prompt: string, format: "png" | "gif") {
 
 // Full animated-GIF pipeline: phrase -> animation spec -> Sora video -> looping GIF.
 async function generateAnimatedGif(
-  phrase: string
+  phrase: string,
+  context?: AnimationContext
 ): Promise<{ mediaUrl: string; downloadUrl: string; mimeType: string; publicId?: string } | null> {
-  const spec = await generateAnimationSpec(phrase);
+  const spec = await generateAnimationSpec(phrase, context);
   if (!spec) {
     return null;
   }
 
-  const soraPrompt = buildSoraPrompt(spec, phrase);
+  const soraPrompt = buildSoraPrompt(spec, phrase, context);
   const video = await generateVideoWithSora(soraPrompt);
   if (!video) {
     return null;
@@ -161,12 +165,18 @@ async function generateAnimatedGif(
   return { mediaUrl: dataUrl, downloadUrl: dataUrl, mimeType: video.mimeType };
 }
 
-async function attachMediaToOutput(phrase: string, analysis: Analysis, item: ReactionItem, fallbackImageUrl?: string) {
+async function attachMediaToOutput(
+  phrase: string,
+  analysis: Analysis,
+  item: ReactionItem,
+  fallbackImageUrl?: string,
+  context?: AnimationContext
+) {
   const prompt = buildVisualPrompt(phrase, analysis, item);
 
   if (item.kind === "GIF") {
     // Try a real animated clip first.
-    const animated = await generateAnimatedGif(phrase);
+    const animated = await generateAnimatedGif(phrase, context);
     if (animated) {
       return { ...item, ...animated, isGenerated: true };
     }
@@ -227,10 +237,13 @@ export async function generateReactionPack(phrase: string, selectedTypes: string
   }
 
   let analysis = base.analysis;
+  let context: AnimationContext | undefined;
 
   try {
     const aiAnalysis = await analyzeWithGPT(phrase);
     analysis = normalizeAnalysis(base.analysis, aiAnalysis);
+    // Carry the detected language + English meaning into the animation pipeline.
+    context = { language: aiAnalysis.language, meaning: aiAnalysis.meaning, emotion: aiAnalysis.emotion };
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     console.log(`ℹ Skipping AI emotion analysis, using fallback: ${msg.substring(0, 60)}`);
@@ -262,7 +275,7 @@ export async function generateReactionPack(phrase: string, selectedTypes: string
       continue;
     }
 
-    const output = await attachMediaToOutput(phrase, analysis, item, stickerAsset?.mediaUrl);
+    const output = await attachMediaToOutput(phrase, analysis, item, stickerAsset?.mediaUrl, context);
     outputs.push(output);
   }
 
